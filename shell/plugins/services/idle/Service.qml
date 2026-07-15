@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
+import Quickshell.Services.UPower
 import Quickshell.Wayland
 import "IdleModel.js" as IdleModel
 
@@ -19,9 +20,18 @@ Item {
   readonly property var idleConfig: shell && shell.shellConfig && shell.shellConfig.idle ? shell.shellConfig.idle : ({})
   readonly property int screensaverTimeoutSeconds: secondsFromConfig(idleConfig.screensaver, defaultScreensaverSeconds)
   readonly property int lockTimeoutSeconds: secondsFromConfig(idleConfig.lock, defaultLockSeconds)
-  readonly property int firstIdleTimeoutSeconds: Math.min(screensaverTimeoutSeconds, lockTimeoutSeconds)
+  // Suspend-on-idle timeouts (seconds; 0 or absent = never). The active one is
+  // chosen by the current power source, so "1h on battery, never on AC" is just
+  // suspendOnBattery=3600, suspendOnAc=0. Controlled solely by config — the
+  // suspend-off menu toggle only hides the manual Suspend entry.
+  readonly property bool onBattery: UPower.onBattery
+  readonly property int suspendOnBatterySeconds: secondsFromConfig(idleConfig.suspendOnBattery, 0)
+  readonly property int suspendOnAcSeconds: secondsFromConfig(idleConfig.suspendOnAc, 0)
+  readonly property int activeSuspendTimeoutSeconds: IdleModel.activeSuspendTimeout(onBattery, suspendOnBatterySeconds, suspendOnAcSeconds)
+  readonly property int firstIdleTimeoutSeconds: IdleModel.firstIdleTimeout([screensaverTimeoutSeconds, lockTimeoutSeconds, activeSuspendTimeoutSeconds])
   readonly property int screensaverDelaySeconds: Math.max(0, screensaverTimeoutSeconds - firstIdleTimeoutSeconds)
   readonly property int lockDelaySeconds: Math.max(0, lockTimeoutSeconds - firstIdleTimeoutSeconds)
+  readonly property int suspendDelaySeconds: Math.max(0, activeSuspendTimeoutSeconds - firstIdleTimeoutSeconds)
   readonly property bool idleEnabled: stayAwakeStateLoaded && !stayAwake
   readonly property string screensaverClass: "org.omarchy.screensaver"
 
@@ -79,13 +89,28 @@ Item {
     runProcess(lockProcess, "lock", "omarchy-system-lock")
   }
 
+  function triggerSuspend(reason) {
+    logEvent("suspend-system", reason || "timeout")
+    runProcess(suspendProcess, "suspend", "systemctl suspend")
+  }
+
+  // (Re)start the suspend countdown for the current power source. Called at cycle
+  // start and whenever the power source changes; a fixed-interval timer means a
+  // change simply restarts the countdown (never on AC, ~timeout on battery).
+  function armSuspend(reason) {
+    suspendTimer.stop()
+    if (!root.idleEnabled || !idleMonitor.isIdle || root.activeSuspendTimeoutSeconds <= 0) return
+    suspendTimer.restart()
+    logEvent("suspend-armed", (reason ? reason + " " : "") + "in " + root.suspendDelaySeconds + "s")
+  }
+
   function startIdleCycle() {
     if (root.idledThisCycle) {
       logEvent("idle-cycle-already-running")
       return
     }
 
-    logEvent("idle-cycle-start", "screensaver=" + root.screensaverTimeoutSeconds + " lock=" + root.lockTimeoutSeconds)
+    logEvent("idle-cycle-start", "screensaver=" + root.screensaverTimeoutSeconds + " lock=" + root.lockTimeoutSeconds + " suspend=" + root.activeSuspendTimeoutSeconds)
     root.idledThisCycle = true
     root.screensaverStartedThisCycle = false
     resetScreensaverWindows()
@@ -95,6 +120,8 @@ Item {
 
     if (root.lockDelaySeconds === 0) lockSystem("lock-timeout-immediate")
     else lockTimer.restart()
+
+    armSuspend("idle-cycle-start")
   }
 
   function cancelIdleCycle(reason) {
@@ -102,6 +129,7 @@ Item {
     screensaverTimer.stop()
     lockTimer.stop()
     screensaverLaunchGraceTimer.stop()
+    suspendTimer.stop()
 
     if (root.idledThisCycle) runProcess(wakeProcess, "wake", "omarchy-system-wake")
 
@@ -173,8 +201,21 @@ Item {
     logEvent("idle-monitor", idleMonitor.isIdle ? "idle" : "active")
     if (!root.idleEnabled) return
 
-    if (idleMonitor.isIdle) startIdleCycle()
-    else handleActiveSignal()
+    if (idleMonitor.isIdle) {
+      startIdleCycle()
+      return
+    }
+
+    // Once lockSystem clears idledThisCycle, handleActiveSignal returns early — but
+    // the suspend stage may still be pending. The screensaver is gone by then, so any
+    // activity here is genuine and must cancel the pending suspend. (Pre-lock activity
+    // is handled via cancelIdleCycle below.)
+    if (!root.idledThisCycle && suspendTimer.running) {
+      suspendTimer.stop()
+      logEvent("suspend-cancel", "post-lock-activity")
+    }
+
+    handleActiveSignal()
   }
 
   function statusJson() {
@@ -186,20 +227,26 @@ Item {
       idle: idleMonitor.isIdle,
       inIdleCycle: root.idledThisCycle,
       screensaverStarted: root.screensaverStartedThisCycle,
+      onBattery: root.onBattery,
       screensaver: root.screensaverTimeoutSeconds,
       lock: root.lockTimeoutSeconds,
+      suspendOnBattery: root.suspendOnBatterySeconds,
+      suspendOnAc: root.suspendOnAcSeconds,
+      activeSuspend: root.activeSuspendTimeoutSeconds,
       screensaverDelay: root.screensaverDelaySeconds,
       lockDelay: root.lockDelaySeconds,
       screensaverWindows: root.screensaverWindowCount,
       timers: {
         screensaver: screensaverTimer.running,
         lock: lockTimer.running,
+        suspend: suspendTimer.running,
         screensaverLaunchGrace: screensaverLaunchGraceTimer.running
       },
       processes: {
         screensaver: screensaverProcess.running,
         lock: lockProcess.running,
-        wake: wakeProcess.running
+        wake: wakeProcess.running,
+        suspend: suspendProcess.running
       },
       lastEvent: root.lastEvent,
       lastEventAt: root.lastEventAt
@@ -270,6 +317,13 @@ Item {
   }
 
   Timer {
+    id: suspendTimer
+    interval: root.suspendDelaySeconds * 1000
+    repeat: false
+    onTriggered: if (root.idleEnabled && idleMonitor.isIdle && root.activeSuspendTimeoutSeconds > 0) root.triggerSuspend("suspend-timeout")
+  }
+
+  Timer {
     id: screensaverLaunchGraceTimer
     interval: 3000
     repeat: false
@@ -285,6 +339,17 @@ Item {
     function onRawEvent(event) { root.handleHyprlandEvent(event) }
   }
 
+  Connections {
+    // Re-evaluate the suspend stage whenever the machine is plugged in or unplugged.
+    // Plugging in when suspendOnAc=0 stops a pending suspend; unplugging while idle
+    // restarts the countdown for the battery timeout.
+    target: UPower
+    function onOnBatteryChanged() {
+      root.logEvent("power-source", root.onBattery ? "battery" : "ac")
+      root.armSuspend("power-source-changed")
+    }
+  }
+
   Process {
     id: screensaverProcess
     onExited: function(exitCode, exitStatus) { root.logEvent("process-exit", "screensaver exitCode=" + exitCode + " status=" + exitStatus) }
@@ -296,6 +361,10 @@ Item {
   Process {
     id: wakeProcess
     onExited: function(exitCode, exitStatus) { root.logEvent("process-exit", "wake exitCode=" + exitCode + " status=" + exitStatus) }
+  }
+  Process {
+    id: suspendProcess
+    onExited: function(exitCode, exitStatus) { root.logEvent("process-exit", "suspend exitCode=" + exitCode + " status=" + exitStatus) }
   }
 
   Process {

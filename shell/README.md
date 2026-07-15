@@ -221,7 +221,9 @@ becomes the authoritative file — we do **not** deep-merge defaults back in.
   "version": 1,
   "idle": {
     "screensaver": 150,
-    "lock": 300
+    "lock": 300,
+    "suspendOnBattery": 3600,
+    "suspendOnAc": 0
   },
   "bar": {
     "id": "omarchy.bar",
@@ -265,7 +267,11 @@ becomes the authoritative file — we do **not** deep-merge defaults back in.
    entries with their own values.
 7. **Idle timings are top-level.** `idle.screensaver` and `idle.lock`
    are seconds since user idle began, so the default lock fires at 300s
-   even if the 150s screensaver starts first.
+   even if the 150s screensaver starts first. `idle.suspendOnBattery` and
+   `idle.suspendOnAc` add an optional suspend stage (seconds; `0` or absent =
+   never); the timeout matching the current power source is used, and it is
+   re-evaluated when you plug in or unplug mid-idle. It is controlled solely by
+   config — unrelated to the `suspend-off` menu toggle.
 8. **`version: 1` is required** at the top level. The shell will fall back
    to defaults rather than load an unknown version.
 

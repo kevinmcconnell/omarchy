@@ -90,7 +90,9 @@ individual plugins (`bar`, `image-selector`, …).
   "version": 1,
   "idle": {
     "screensaver": 150,
-    "lock": 300
+    "lock": 300,
+    "suspendOnBattery": 3600,
+    "suspendOnAc": 0
   },
   "bar": {
     "id": "omarchy.bar",
@@ -125,6 +127,12 @@ Rules:
    First-party non-bar plugins are always enabled.
 6. `allowMultiple: true` in the manifest permits multiple instances.
 7. `idle.screensaver` and `idle.lock` are seconds since user idle began.
+   `idle.suspendOnBattery` and `idle.suspendOnAc` are seconds until the system
+   suspends while idle (`0` or absent = never); the one matching the current
+   power source is used, so "suspend after 1h on battery, never on AC" is
+   `suspendOnBattery: 3600, suspendOnAc: 0`. Plugging in cancels a pending
+   suspend; unplugging while idle starts counting. This is independent of the
+   `suspend-off` menu toggle, which only hides the manual Suspend entry.
 8. `version: 1` is required.
 
 `config/omarchy/shell.json` describes the fresh-install state. When no

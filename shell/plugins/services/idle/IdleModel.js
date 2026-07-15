@@ -4,6 +4,21 @@ function secondsFromConfig(value, fallback) {
   return Math.floor(n)
 }
 
+function activeSuspendTimeout(onBattery, onBatterySecs, onAcSecs) {
+  return onBattery ? secondsFromConfig(onBatterySecs, 0) : secondsFromConfig(onAcSecs, 0)
+}
+
+function firstIdleTimeout(candidates) {
+  var list = candidates || []
+  var min = null
+  for (var i = 0; i < list.length; i++) {
+    var v = Number(list[i])
+    if (!isFinite(v) || v <= 0) continue
+    if (min === null || v < min) min = v
+  }
+  return min === null ? 0 : min
+}
+
 function eventParts(event, count) {
   try {
     if (event && event.parse) return event.parse(count)
@@ -46,6 +61,8 @@ function screensaverWindowsAfter(windows, address, visible) {
 if (typeof module !== "undefined") {
   module.exports = {
     secondsFromConfig: secondsFromConfig,
+    activeSuspendTimeout: activeSuspendTimeout,
+    firstIdleTimeout: firstIdleTimeout,
     eventParts: eventParts,
     screensaverWindowsAfter: screensaverWindowsAfter
   }
